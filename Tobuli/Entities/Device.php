@@ -513,7 +513,11 @@ class Device extends AbstractEntity implements DisplayInterface, FcmTokenableInt
 
     public function isConnected()
     {
-        return Redis::connection('process')->get('connected.' . $this->imei) ? true : false;
+        try {
+            return \Illuminate\Support\Facades\Redis::connection('process')->get('connected.' . $this->imei) ? true : false;
+        } catch (\Exception $e) {
+            return false;
+        }
     }
 
     public function getParameter($key, $default = null)

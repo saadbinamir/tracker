@@ -14,7 +14,7 @@ $result = [
 
     'force_https' => env('FORCE_HTTPS', false),
 
-    'trust_hosts' => array_filter(explode(';', env('TRUST_HOSTS', null))),
+    'trust_hosts' => array_filter(explode(';', env('TRUST_HOSTS', ''))),
 
 	/*
 	|--------------------------------------------------------------------------

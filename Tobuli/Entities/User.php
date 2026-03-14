@@ -249,6 +249,9 @@ class User extends AbstractEntity implements
     {
         try {
             $list = unserialize($value);
+            if (!is_array($list)) {
+                $list = [];
+            }
             $maps = array_keys(getAvailableMaps());
 
             $list = array_filter($list, function($id) use ($maps) {

@@ -14,27 +14,39 @@ class DeviceModelCache
 
     public static function keys(): array
     {
-        return self::getRedis()->keys(self::PREFIX . '*');
+        try {
+            return self::getRedis()->keys(self::PREFIX . '*');
+        } catch (\Exception $e) {
+            return [];
+        }
     }
 
     public static function setDevice(Device $device, ?string $oldImei = null)
     {
-        return self::getRedis()->pipeline(function ($pipe) use ($device, $oldImei) {
-            if ($oldImei) {
-                $pipe->del(self::PREFIX . $oldImei);
-            }
+        try {
+            return self::getRedis()->pipeline(function ($pipe) use ($device, $oldImei) {
+                if ($oldImei) {
+                    $pipe->del(self::PREFIX . $oldImei);
+                }
 
-            if ($device->model_id) {
-                $pipe->set(self::PREFIX . $device->imei, $device->model->model);
-            } else {
-                $pipe->del(self::PREFIX . $device->imei);
-            }
-        });
+                if ($device->model_id) {
+                    $pipe->set(self::PREFIX . $device->imei, $device->model->model);
+                } else {
+                    $pipe->del(self::PREFIX . $device->imei);
+                }
+            });
+        } catch (\Exception $e) {
+            return null;
+        }
     }
 
     public static function deleteDevice(Device $device)
     {
-        return self::getRedis()->del(self::PREFIX . $device->imei);
+        try {
+            return self::getRedis()->del(self::PREFIX . $device->imei);
+        } catch (\Exception $e) {
+            return null;
+        }
     }
 
     public static function reload()

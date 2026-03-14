@@ -55,8 +55,10 @@ class LoginController extends Controller
      *
      * @return RedirectResponse
      */
-    public function store($hash = null, AuthManager $loginMethodService)
+    public function store($hash = null)
     {
+        $loginMethodService = app(\Tobuli\Services\AuthManager::class);
+
         if (isPublic()) {
             if ($user = \CustomFacades\RemoteUser::getByHash($hash)) {
 
