@@ -82,10 +82,11 @@ class DeviceIconsTableSeeder extends Seeder {
             ]);
         }
 
+        $web_db = env('web_database', 'gpswox_web');
 
-        DB::statement("DELETE FROM `gpswox_web`.`device_icons` WHERE `device_icons`.`path` IN ('images/arrow-ack.png', 'assets/images/arrow-ack.png');");
-        DB::statement("INSERT INTO `gpswox_web`.`device_icons` (`id`, `order`, `width`, `height`, `path`, `type`) VALUES ('0', '1', '25', '33', 'assets/images/arrow-ack.png', 'arrow');");
-        DB::statement("UPDATE `gpswox_web`.`device_icons` SET `id` = '0' WHERE `device_icons`.`path` = 'assets/images/arrow-ack.png';");
+        DB::statement("DELETE FROM `$web_db`.`device_icons` WHERE `device_icons`.`path` IN ('images/arrow-ack.png', 'assets/images/arrow-ack.png');");
+        DB::statement("INSERT INTO `$web_db`.`device_icons` (`id`, `order`, `width`, `height`, `path`, `type`) VALUES ('0', '1', '25', '33', 'assets/images/arrow-ack.png', 'arrow');");
+        DB::statement("UPDATE `$web_db`.`device_icons` SET `id` = '0' WHERE `device_icons`.`path` = 'assets/images/arrow-ack.png';");
 	}
 
 }
