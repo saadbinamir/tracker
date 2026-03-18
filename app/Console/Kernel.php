@@ -63,6 +63,7 @@ class Kernel extends ConsoleKernel {
         'App\Console\Commands\AlterPositionTablesCommand',
         'App\Console\Commands\BackupManageCommand',
         'App\Console\Commands\DeleteInvalidFuelEventsCommand',
+        'App\Console\Commands\SyncTraccarData',
     ];
 
     /**
@@ -115,6 +116,11 @@ class Kernel extends ConsoleKernel {
 
         $schedule
             ->command('devices:check_offline')
+            ->everyMinute()
+            ->withoutOverlapping();
+
+        $schedule
+            ->command('traccar:sync')
             ->everyMinute()
             ->withoutOverlapping();
     }

@@ -167,6 +167,26 @@ class Device extends AbstractEntity implements DisplayInterface, FcmTokenableInt
             unset($device->database_id);
 
             $device->traccar_device_id = $traccarDevice->id;
+
+            // Also register in tc_devices (standard Traccar) so the Traccar server recognizes it immediately
+            try {
+                $exists = DB::connection('traccar_mysql')
+                    ->table('tc_devices')
+                    ->where('uniqueid', $device->imei)
+                    ->exists();
+
+                if (!$exists) {
+                    DB::connection('traccar_mysql')
+                        ->table('tc_devices')
+                        ->insert([
+                            'uniqueid' => $device->imei,
+                            'name'     => $device->name,
+                        ]);
+                }
+            } catch (\Exception $e) {
+                // Log but don't block device creation if tc_devices insert fails
+                \Log::warning('Failed to register device in tc_devices: ' . $e->getMessage());
+            }
         });
 
         static::updated(function ($device) {
