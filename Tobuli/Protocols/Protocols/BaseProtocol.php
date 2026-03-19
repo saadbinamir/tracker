@@ -8,6 +8,7 @@ use Illuminate\Support\Str;
 use Tobuli\Entities\CommandTemplate;
 use Tobuli\Entities\UserGprsTemplate;
 use Tobuli\Entities\UserSmsTemplate;
+use Illuminate\Support\Facades\DB;
 use Tobuli\Protocols\Protocol;
 use Tobuli\Protocols\Commands;
 use CustomFacades\Field;
@@ -152,6 +153,20 @@ class BaseProtocol implements Protocol
             'uniqueId' => $device->imei,
             'type' => $data['type'],
         ];
+
+        // Standard Traccar requires deviceId (from tc_devices) to send commands
+        try {
+            $tcDevice = DB::connection('traccar_mysql')
+                ->table('tc_devices')
+                ->where('uniqueid', $device->imei)
+                ->first();
+
+            if ($tcDevice) {
+                $data['deviceId'] = $tcDevice->id;
+            }
+        } catch (\Exception $e) {
+            // Fallback: command will use uniqueId only
+        }
 
         if ( ! empty($attributes))
             $data['attributes'] = $attributes;
