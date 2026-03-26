@@ -7,6 +7,10 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Database\Schema\Blueprint;
+use Tobuli\Entities\Alert;
+use Tobuli\Entities\Device;
+use Tobuli\Helpers\Alerts\Check\Checker;
+use Tobuli\Services\EventWriteService;
 
 class SyncTraccarData extends Command
 {
@@ -22,8 +26,13 @@ class SyncTraccarData extends Command
     // Max runtime for daemon mode (seconds) - prevents memory leaks, supervisor will restart
     const MAX_RUNTIME_SECONDS = 3600;
 
+    private $events = [];
+    private $eventWriteService;
+
     public function handle()
     {
+        $this->eventWriteService = new EventWriteService();
+
         if ($this->option('daemon')) {
             return $this->runDaemon();
         }
@@ -58,6 +67,9 @@ class SyncTraccarData extends Command
         $this->syncNewDevicesToTraccar();
         $this->syncPositionData();
         $this->syncRedisConnectivity();
+
+        // Write any events that were generated during position sync
+        $this->writeEvents();
     }
 
     /**
@@ -126,6 +138,14 @@ class SyncTraccarData extends Command
             // Convert Traccar JSON attributes to the XML format the web app expects
             $otherXml = $this->jsonAttributesToXml($tcPosition->attributes ?? '{}');
 
+            // Check if data actually changed (avoid unnecessary updates)
+            $currentServerTime = DB::connection('mysql')
+                ->table('traccar_devices')
+                ->where('id', $webDevice->id)
+                ->value('server_time');
+
+            $dataChanged = ($currentServerTime !== $tcPosition->servertime);
+
             // Update traccar_devices with the latest position data
             DB::connection('mysql')
                 ->table('traccar_devices')
@@ -146,12 +166,121 @@ class SyncTraccarData extends Command
             // Ensure the positions_<id> table exists and sync recent positions
             $posTable = "positions_{$webDevice->id}";
             $this->ensurePositionsTable($posTable);
-            $this->syncRecentPositions($webDevice, $tcDevice);
+            $newCount = $this->syncRecentPositions($webDevice, $tcDevice);
+
+            // Check position-based alerts (ignition, geofence, speed, etc.) when data changes
+            if ($dataChanged && $newCount > 0) {
+                $this->checkPositionAlerts($webDevice, $otherXml, $tcPosition);
+            }
         }
     }
 
     /**
+     * Check position-based alerts (ignition on/off, geofence, overspeed, etc.)
+     */
+    private function checkPositionAlerts($webDevice, $otherXml, $tcPosition)
+    {
+        try {
+            // Load the Device model with its alerts and sensors
+            $device = Device::with(['traccar', 'sensors'])
+                ->find($webDevice->id);
+
+            if (!$device || !$device->traccar) {
+                return;
+            }
+
+            // Get position-based alerts for this device
+            $alerts = $device
+                ->alerts()
+                ->withPivot('started_at', 'fired_at', 'silenced_at', 'active_from', 'active_to')
+                ->checkByPosition()
+                ->active()
+                ->with(['user', 'geofences', 'drivers', 'events_custom', 'zones'])
+                ->get();
+
+            if ($alerts->isEmpty()) {
+                return;
+            }
+
+            // Create a position-like object for the Checker
+            $positionClass = 'Tobuli\Entities\TraccarPosition';
+            if (!class_exists($positionClass)) {
+                $positionClass = 'App\Console\Position';
+            }
+
+            // Build current position
+            $currentPos = new \stdClass();
+            $currentPos->latitude = $tcPosition->latitude;
+            $currentPos->longitude = $tcPosition->longitude;
+            $currentPos->speed = $tcPosition->speed;
+            $currentPos->course = $tcPosition->course;
+            $currentPos->altitude = $tcPosition->altitude;
+            $currentPos->time = $tcPosition->fixtime;
+            $currentPos->server_time = $tcPosition->servertime;
+            $currentPos->device_time = $tcPosition->devicetime;
+            $currentPos->other = $otherXml;
+            $currentPos->protocol = $tcPosition->protocol;
+            $currentPos->valid = $tcPosition->valid ?? 1;
+
+            // Get previous position for comparison
+            $posTable = "positions_{$webDevice->id}";
+            $prevRow = DB::connection('traccar_mysql')
+                ->table($posTable)
+                ->orderBy('id', 'desc')
+                ->skip(1)
+                ->first();
+
+            $prevPos = null;
+            if ($prevRow) {
+                $prevPos = new \stdClass();
+                $prevPos->latitude = $prevRow->latitude;
+                $prevPos->longitude = $prevRow->longitude;
+                $prevPos->speed = $prevRow->speed;
+                $prevPos->course = $prevRow->course;
+                $prevPos->altitude = $prevRow->altitude;
+                $prevPos->time = $prevRow->time;
+                $prevPos->server_time = $prevRow->server_time;
+                $prevPos->device_time = $prevRow->device_time;
+                $prevPos->other = $prevRow->other;
+                $prevPos->protocol = $prevRow->protocol;
+                $prevPos->valid = $prevRow->valid ?? 1;
+            }
+
+            // Run the alert checker
+            $checker = new Checker($device, $alerts);
+            $events = $checker->check($currentPos, $prevPos);
+
+            if ($events) {
+                $this->events = array_merge($this->events, $events);
+            }
+        } catch (\Exception $e) {
+            $this->warn("Alert check failed for {$webDevice->uniqueId}: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * Write accumulated events
+     */
+    private function writeEvents()
+    {
+        if (empty($this->events)) {
+            return;
+        }
+
+        try {
+            $this->eventWriteService->write($this->events);
+            $count = count($this->events);
+            $this->info("Wrote {$count} events");
+        } catch (\Exception $e) {
+            $this->warn("Event write failed: " . $e->getMessage());
+        }
+
+        $this->events = [];
+    }
+
+    /**
      * Sync recent tc_positions that haven't been synced yet
+     * Returns the count of new positions synced
      */
     private function syncRecentPositions($webDevice, $tcDevice)
     {
@@ -196,6 +325,8 @@ class SyncTraccarData extends Command
                     'distance'    => 0,
                 ]);
         }
+
+        return $newPositions->count();
     }
 
     /**
