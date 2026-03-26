@@ -107,14 +107,16 @@ class SyncTraccarData extends Command
                 ->where('uniqueid', $webDevice->uniqueId)
                 ->first();
 
-            if (!$tcDevice || !$tcDevice->positionid) {
+            if (!$tcDevice) {
                 continue;
             }
 
-            // Get the latest position from tc_positions
+            // Get the ACTUAL latest position from tc_positions by deviceid
+            // (don't rely on tc_devices.positionid — it's not always updated)
             $tcPosition = DB::connection('traccar_mysql')
                 ->table('tc_positions')
-                ->where('id', $tcDevice->positionid)
+                ->where('deviceid', $tcDevice->id)
+                ->orderBy('id', 'desc')
                 ->first();
 
             if (!$tcPosition) {
