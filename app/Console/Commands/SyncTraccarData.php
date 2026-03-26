@@ -10,19 +10,54 @@ use Illuminate\Database\Schema\Blueprint;
 
 class SyncTraccarData extends Command
 {
-    protected $signature = 'traccar:sync';
-    protected $description = 'Sync device and position data from standard Traccar (tc_devices/tc_positions) into the web app tables (traccar_devices/positions_<id>)';
+    protected $signature = 'traccar:sync {--daemon : Run continuously instead of once}';
+    protected $description = 'Sync device and position data from standard Traccar (tc_devices/tc_positions) into the web app tables';
 
     // How many seconds of inactivity before a device is considered offline
     const ONLINE_TIMEOUT_SECONDS = 300;
 
+    // How often to sync in daemon mode (seconds)
+    const DAEMON_SLEEP_SECONDS = 10;
+
+    // Max runtime for daemon mode (seconds) - prevents memory leaks, supervisor will restart
+    const MAX_RUNTIME_SECONDS = 3600;
+
     public function handle()
+    {
+        if ($this->option('daemon')) {
+            return $this->runDaemon();
+        }
+
+        return $this->runOnce();
+    }
+
+    private function runDaemon()
+    {
+        $this->info('Starting traccar:sync daemon (every ' . self::DAEMON_SLEEP_SECONDS . 's)...');
+        $startTime = time();
+
+        while (true) {
+            try {
+                $this->runOnce();
+            } catch (\Exception $e) {
+                $this->error('Sync error: ' . $e->getMessage());
+            }
+
+            // Exit after max runtime to prevent memory leaks (supervisor will restart)
+            if ((time() - $startTime) > self::MAX_RUNTIME_SECONDS) {
+                $this->info('Max runtime reached, exiting for restart...');
+                return 0;
+            }
+
+            sleep(self::DAEMON_SLEEP_SECONDS);
+        }
+    }
+
+    private function runOnce()
     {
         $this->syncNewDevicesToTraccar();
         $this->syncPositionData();
         $this->syncRedisConnectivity();
-
-        $this->info('Traccar sync completed.');
     }
 
     /**
@@ -106,36 +141,9 @@ class SyncTraccarData extends Command
                     'other'              => $otherXml,
                 ]);
 
-            // Ensure the positions_<id> table exists and insert the position
+            // Ensure the positions_<id> table exists and sync recent positions
             $posTable = "positions_{$webDevice->id}";
             $this->ensurePositionsTable($posTable);
-
-            // Only insert if this position is new (check by time to avoid duplicates)
-            $lastPos = DB::connection('traccar_mysql')
-                ->table($posTable)
-                ->orderBy('id', 'desc')
-                ->first();
-
-            if (!$lastPos || $lastPos->server_time !== $tcPosition->servertime) {
-                DB::connection('traccar_mysql')
-                    ->table($posTable)
-                    ->insert([
-                        'altitude'    => $tcPosition->altitude,
-                        'course'      => $tcPosition->course,
-                        'latitude'    => $tcPosition->latitude,
-                        'longitude'   => $tcPosition->longitude,
-                        'other'       => $otherXml,
-                        'speed'       => $tcPosition->speed,
-                        'time'        => $tcPosition->fixtime,
-                        'device_time' => $tcPosition->devicetime,
-                        'server_time' => $tcPosition->servertime,
-                        'valid'       => $tcPosition->valid ? 1 : 0,
-                        'protocol'    => $tcPosition->protocol,
-                        'distance'    => 0,
-                    ]);
-            }
-
-            // Sync recent positions (last N) for history from tc_positions
             $this->syncRecentPositions($webDevice, $tcDevice);
         }
     }
@@ -186,10 +194,6 @@ class SyncTraccarData extends Command
                     'distance'    => 0,
                 ]);
         }
-
-        if ($newPositions->isNotEmpty()) {
-            $this->info("Synced {$newPositions->count()} positions for {$webDevice->uniqueId}");
-        }
     }
 
     /**
@@ -229,11 +233,10 @@ class SyncTraccarData extends Command
         try {
             Redis::connection('process')->set("connected.{$imei}", 1);
         } catch (\Exception $e) {
-            // Fallback to default connection
             try {
                 Redis::set("connected.{$imei}", 1);
             } catch (\Exception $e2) {
-                $this->warn("Could not set Redis key for {$imei}: {$e2->getMessage()}");
+                // Silently ignore
             }
         }
     }
@@ -252,7 +255,7 @@ class SyncTraccarData extends Command
     }
 
     /**
-     * Create a positions_<id> table if it doesn't exist (using the traccar_mysql connection)
+     * Create a positions_<id> table if it doesn't exist
      */
     private function ensurePositionsTable($tableName)
     {
@@ -282,8 +285,6 @@ class SyncTraccarData extends Command
 
     /**
      * Convert Traccar's JSON attributes string to the XML format the web app expects
-     * Input:  {"batteryLevel":98,"distance":0.0,"totalDistance":123.45,...}
-     * Output: <info><batteryLevel>98</batteryLevel><distance>0.0</distance>...</info>
      */
     private function jsonAttributesToXml($jsonStr)
     {

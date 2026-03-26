@@ -119,6 +119,18 @@ class Kernel extends ConsoleKernel {
             ->everyMinute()
             ->withoutOverlapping();
 
+        // Event/alert checking - generates ignition, speed, geofence events etc.
+        $schedule
+            ->command('alerts:check')
+            ->everyMinute()
+            ->withoutOverlapping();
+
+        $schedule
+            ->command('events:send')
+            ->everyMinute()
+            ->withoutOverlapping();
+
+        // Traccar sync runs as a daemon via systemd, but keep scheduler as backup
         $schedule
             ->command('traccar:sync')
             ->everyMinute()
