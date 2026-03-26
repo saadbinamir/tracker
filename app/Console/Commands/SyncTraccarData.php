@@ -147,6 +147,7 @@ class SyncTraccarData extends Command
             $dataChanged = ($currentServerTime !== $tcPosition->servertime);
 
             // Update traccar_devices with the latest position data
+            // Use servertime for time/device_time because device GPS clocks are unreliable
             DB::connection('mysql')
                 ->table('traccar_devices')
                 ->where('id', $webDevice->id)
@@ -157,8 +158,8 @@ class SyncTraccarData extends Command
                     'course'             => $tcPosition->course,
                     'altitude'           => $tcPosition->altitude,
                     'server_time'        => $tcPosition->servertime,
-                    'device_time'        => $tcPosition->devicetime,
-                    'time'               => $tcPosition->fixtime,
+                    'device_time'        => $tcPosition->servertime,
+                    'time'               => $tcPosition->servertime,
                     'protocol'           => $tcPosition->protocol,
                     'other'              => $otherXml,
                 ]);
@@ -317,8 +318,8 @@ class SyncTraccarData extends Command
                     'longitude'   => $pos->longitude,
                     'other'       => $otherXml,
                     'speed'       => $pos->speed,
-                    'time'        => $pos->fixtime,
-                    'device_time' => $pos->devicetime,
+                    'time'        => $pos->servertime,
+                    'device_time' => $pos->servertime,
                     'server_time' => $pos->servertime,
                     'valid'       => $pos->valid ? 1 : 0,
                     'protocol'    => $pos->protocol,
