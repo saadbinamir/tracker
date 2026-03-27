@@ -108,69 +108,58 @@ class SyncTraccarData extends Command
 
             if (!$tcDevice) continue;
 
-            // Get latest position from tc_positions by deviceid 
-            $tcPosition = DB::connection('traccar_mysql')
-                ->table('tc_positions')
-                ->where('deviceid', $tcDevice->id)
-                ->orderBy('id', 'desc')
-                ->first();
+            // Ensure positions table exists
+            $posTable = "positions_{$webDevice->id}";
+            $this->ensurePositionsTable($posTable);
 
-            if (!$tcPosition) continue;
+            // Sync new positions and get them for alert checking
+            $newPositions = $this->getAndSyncNewPositions($webDevice, $tcDevice);
 
-            // Check if we have new data
-            $currentServerTime = DB::connection('mysql')
-                ->table('traccar_devices')
-                ->where('id', $webDevice->id)
-                ->value('server_time');
+            if ($newPositions->isEmpty()) continue;
 
-            $dataChanged = ($currentServerTime !== $tcPosition->servertime);
+            // Use the LATEST position for device data update
+            $latestPos = $newPositions->last();
+            $latestAttributes = json_decode($latestPos->attributes ?? '{}', true) ?: [];
+            $latestOtherXml = $this->jsonAttributesToXml($latestPos->attributes ?? '{}');
 
-            // Parse attributes for ignition/engine status
-            $attributes = json_decode($tcPosition->attributes ?? '{}', true) ?: [];
-            $otherXml = $this->jsonAttributesToXml($tcPosition->attributes ?? '{}');
+            // Determine engine status from latest position
+            $ignitionOn = isset($latestAttributes['ignition']) ? (bool)$latestAttributes['ignition'] : null;
 
-            // Determine engine (ignition) status from position attributes
-            $ignitionOn = isset($attributes['ignition']) ? (bool)$attributes['ignition'] : null;
-
-            // Build update data
+            // Build update data for traccar_devices
             $now = date('Y-m-d H:i:s');
             $updateData = [
-                'lastValidLatitude'  => $tcPosition->latitude,
-                'lastValidLongitude' => $tcPosition->longitude,
-                'speed'              => $tcPosition->speed,
-                'course'             => $tcPosition->course,
-                'altitude'           => $tcPosition->altitude,
-                'server_time'        => $tcPosition->servertime,
-                'device_time'        => $tcPosition->servertime,
-                'time'               => $tcPosition->servertime,
-                'protocol'           => $tcPosition->protocol,
-                'other'              => $otherXml,
+                'lastValidLatitude'  => $latestPos->latitude,
+                'lastValidLongitude' => $latestPos->longitude,
+                'speed'              => $latestPos->speed,
+                'course'             => $latestPos->course,
+                'altitude'           => $latestPos->altitude,
+                'server_time'        => $latestPos->servertime,
+                'device_time'        => $latestPos->servertime,
+                'time'               => $latestPos->servertime,
+                'protocol'           => $latestPos->protocol,
+                'other'              => $latestOtherXml,
                 'updated_at'         => $now,
             ];
 
-            // Update engine timestamps (critical for status dot color)
+            // Engine timestamps for dot color
             if ($ignitionOn === true) {
-                $updateData['engine_on_at'] = $tcPosition->servertime;
-                // Also set moved_at if speed > 0
-                if ($tcPosition->speed > 0) {
-                    $updateData['moved_at'] = $tcPosition->servertime;
-                }
+                $updateData['engine_on_at'] = $latestPos->servertime;
             } elseif ($ignitionOn === false) {
-                $updateData['engine_off_at'] = $tcPosition->servertime;
+                $updateData['engine_off_at'] = $latestPos->servertime;
             }
 
             // Track engine state changes
-            $prevEngineOn = $webDevice->engine_on_at && 
+            $prevEngineOn = $webDevice->engine_on_at &&
                             strtotime($webDevice->engine_on_at) > strtotime($webDevice->engine_off_at ?: '1970-01-01');
             if ($ignitionOn !== null && $ignitionOn !== $prevEngineOn) {
-                $updateData['engine_changed_at'] = $tcPosition->servertime;
+                $updateData['engine_changed_at'] = $latestPos->servertime;
             }
 
-            // Update speed tracking
-            if ($tcPosition->speed > 0) {
-                $updateData['moved_at'] = $tcPosition->servertime;
+            // Movement tracking
+            if ($latestPos->speed > 0) {
+                $updateData['moved_at'] = $latestPos->servertime;
             } else {
-                $updateData['stoped_at'] = $tcPosition->servertime;
+                $updateData['stoped_at'] = $latestPos->servertime;
             }
 
             // Write to traccar_devices
@@ -179,116 +168,25 @@ class SyncTraccarData extends Command
                 ->where('id', $webDevice->id)
                 ->update($updateData);
 
-            // Sync positions to positions_<id> table
-            $posTable = "positions_{$webDevice->id}";
-            $this->ensurePositionsTable($posTable);
-            $newCount = $this->syncRecentPositions($webDevice, $tcDevice);
-
-            // Check position-based alerts when new data arrives
-            if ($dataChanged && $newCount > 0) {
-                $this->checkPositionAlerts($webDevice, $otherXml, $tcPosition);
-            }
+            // Check alerts for EACH new position individually (catches all state transitions)
+            $this->checkPositionAlertsForEachPosition($webDevice, $newPositions);
         }
     }
 
     /**
-     * Check position-based alerts (ignition, geofence, overspeed, etc.)
-     * Uses TraccarPosition model for compatibility with the sensor/checker system
+     * Get new positions from tc_positions, insert into positions_<id>, and return them
      */
-    private function checkPositionAlerts($webDevice, $otherXml, $tcPosition)
-    {
-        try {
-            $device = Device::with(['traccar', 'sensors'])
-                ->find($webDevice->id);
-
-            if (!$device || !$device->traccar) return;
-
-            $alerts = $device
-                ->alerts()
-                ->withPivot('started_at', 'fired_at', 'silenced_at', 'active_from', 'active_to')
-                ->checkByPosition()
-                ->active()
-                ->with(['user', 'geofences', 'drivers', 'events_custom', 'zones'])
-                ->get();
-
-            if ($alerts->isEmpty()) return;
-
-            // Build current position using TraccarPosition model (compatible with sensor system)
-            $currentPos = new TraccarPosition([
-                'latitude'    => $tcPosition->latitude,
-                'longitude'   => $tcPosition->longitude,
-                'speed'       => $tcPosition->speed,
-                'course'      => $tcPosition->course,
-                'altitude'    => $tcPosition->altitude,
-                'time'        => $tcPosition->servertime,
-                'server_time' => $tcPosition->servertime,
-                'device_time' => $tcPosition->servertime,
-                'other'       => $otherXml,
-                'protocol'    => $tcPosition->protocol,
-                'valid'       => $tcPosition->valid ?? 1,
-            ]);
-
-            // Get previous position for comparison
-            $posTable = "positions_{$webDevice->id}";
-            $prevRow = DB::connection('traccar_mysql')
-                ->table($posTable)
-                ->orderBy('id', 'desc')
-                ->skip(1)
-                ->first();
-
-            $prevPos = null;
-            if ($prevRow) {
-                $prevPos = new TraccarPosition([
-                    'latitude'    => $prevRow->latitude,
-                    'longitude'   => $prevRow->longitude,
-                    'speed'       => $prevRow->speed,
-                    'course'      => $prevRow->course,
-                    'altitude'    => $prevRow->altitude,
-                    'time'        => $prevRow->time,
-                    'server_time' => $prevRow->server_time,
-                    'device_time' => $prevRow->device_time,
-                    'other'       => $prevRow->other,
-                    'protocol'    => $prevRow->protocol,
-                    'valid'       => $prevRow->valid ?? 1,
-                ]);
-            }
-
-            // Run checker
-            $checker = new Checker($device, $alerts);
-            $events = $checker->check($currentPos, $prevPos);
-
-            if ($events) {
-                $this->events = array_merge($this->events, $events);
-                $this->info("Generated " . count($events) . " event(s) for {$webDevice->uniqueId}");
-            }
-        } catch (\Exception $e) {
-            $this->warn("Alert check failed for {$webDevice->uniqueId}: " . $e->getMessage());
-        }
-    }
-
-    private function writeEvents()
-    {
-        if (empty($this->events)) return;
-
-        try {
-            $this->eventWriteService->write($this->events);
-            $this->info("Wrote " . count($this->events) . " events");
-        } catch (\Exception $e) {
-            $this->warn("Event write failed: " . $e->getMessage());
-        }
-
-        $this->events = [];
-    }
-
-    private function syncRecentPositions($webDevice, $tcDevice)
+    private function getAndSyncNewPositions($webDevice, $tcDevice)
     {
         $posTable = "positions_{$webDevice->id}";
 
+        // Get the most recent server_time we already have
         $lastSynced = DB::connection('traccar_mysql')
             ->table($posTable)
             ->orderBy('server_time', 'desc')
             ->value('server_time');
 
+        // Get new positions
         $query = DB::connection('traccar_mysql')
             ->table('tc_positions')
             ->where('deviceid', $tcDevice->id)
@@ -301,6 +199,7 @@ class SyncTraccarData extends Command
 
         $newPositions = $query->get();
 
+        // Insert each into positions_<id>
         foreach ($newPositions as $pos) {
             $otherXml = $this->jsonAttributesToXml($pos->attributes ?? '{}');
 
@@ -322,7 +221,107 @@ class SyncTraccarData extends Command
                 ]);
         }
 
-        return $newPositions->count();
+        return $newPositions;
+    }
+
+    /**
+     * Check position-based alerts for EACH new position individually.
+     * This catches all state transitions (e.g., ignition ON→OFF→ON within one sync cycle).
+     */
+    private function checkPositionAlertsForEachPosition($webDevice, $newPositions)
+    {
+        try {
+            $device = Device::with(['traccar', 'sensors'])
+                ->find($webDevice->id);
+
+            if (!$device || !$device->traccar) return;
+
+            $alerts = $device
+                ->alerts()
+                ->withPivot('started_at', 'fired_at', 'silenced_at', 'active_from', 'active_to')
+                ->checkByPosition()
+                ->active()
+                ->with(['user', 'geofences', 'drivers', 'events_custom', 'zones'])
+                ->get();
+
+            if ($alerts->isEmpty()) return;
+
+            $checker = new Checker($device, $alerts);
+
+            // Get the last known position BEFORE the new batch (for first comparison)
+            $posTable = "positions_{$webDevice->id}";
+            $lastKnownRow = DB::connection('traccar_mysql')
+                ->table($posTable)
+                ->where('server_time', '<', $newPositions->first()->servertime)
+                ->orderBy('id', 'desc')
+                ->first();
+
+            $prevPos = null;
+            if ($lastKnownRow) {
+                $prevPos = new TraccarPosition([
+                    'latitude'    => $lastKnownRow->latitude,
+                    'longitude'   => $lastKnownRow->longitude,
+                    'speed'       => $lastKnownRow->speed,
+                    'course'      => $lastKnownRow->course,
+                    'altitude'    => $lastKnownRow->altitude,
+                    'time'        => $lastKnownRow->time,
+                    'server_time' => $lastKnownRow->server_time,
+                    'device_time' => $lastKnownRow->device_time,
+                    'other'       => $lastKnownRow->other,
+                    'protocol'    => $lastKnownRow->protocol,
+                    'valid'       => $lastKnownRow->valid ?? 1,
+                ]);
+            }
+
+            // Process each position sequentially
+            foreach ($newPositions as $pos) {
+                $otherXml = $this->jsonAttributesToXml($pos->attributes ?? '{}');
+
+                $currentPos = new TraccarPosition([
+                    'latitude'    => $pos->latitude,
+                    'longitude'   => $pos->longitude,
+                    'speed'       => $pos->speed,
+                    'course'      => $pos->course,
+                    'altitude'    => $pos->altitude,
+                    'time'        => $pos->servertime,
+                    'server_time' => $pos->servertime,
+                    'device_time' => $pos->servertime,
+                    'other'       => $otherXml,
+                    'protocol'    => $pos->protocol,
+                    'valid'       => $pos->valid ?? 1,
+                ]);
+
+                $checker->setDevice($device);
+                $events = $checker->check($currentPos, $prevPos);
+
+                if ($events) {
+                    $this->events = array_merge($this->events, $events);
+                }
+
+                // Current becomes previous for next iteration
+                $prevPos = $currentPos;
+            }
+
+            if (!empty($this->events)) {
+                $this->info("Generated " . count($this->events) . " event(s) for {$webDevice->uniqueId}");
+            }
+        } catch (\Exception $e) {
+            $this->warn("Alert check failed for {$webDevice->uniqueId}: " . $e->getMessage());
+        }
+    }
+
+    private function writeEvents()
+    {
+        if (empty($this->events)) return;
+
+        try {
+            $this->eventWriteService->write($this->events);
+            $this->info("Wrote " . count($this->events) . " events");
+        } catch (\Exception $e) {
+            $this->warn("Event write failed: " . $e->getMessage());
+        }
+
+        $this->events = [];
     }
 
     private function syncRedisConnectivity()
