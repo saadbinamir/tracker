@@ -6,6 +6,7 @@ use CustomFacades\ModalHelpers\SensorModalHelper;
 use Tobuli\Entities\Device;
 use Tobuli\Entities\SensorGroupSensor;
 use Tobuli\Entities\User;
+use Tobuli\Sensors\SensorsManager;
 
 class DeviceSensorsService
 {
@@ -41,8 +42,16 @@ class DeviceSensorsService
     public function addSensor(Device $device, User $user, array $data)
     {
         //tmp
-        if ( ! $data['show_in_popup']) {
+        if ( ! ($data['show_in_popup'] ?? null)) {
             unset($data['show_in_popup']);
+        }
+
+        if (empty($data['shown_value_by'])) {
+            $sensorsManager = new SensorsManager();
+            $sensorType = $sensorsManager->resolveType($data['type']);
+            if ($sensorType && $showTypes = $sensorType::getShowTypes()) {
+                $data['shown_value_by'] = array_key_first($showTypes);
+            }
         }
 
         SensorModalHelper::setData(array_merge([
