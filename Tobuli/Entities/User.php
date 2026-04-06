@@ -259,7 +259,7 @@ class User extends AbstractEntity implements
             });
 
             return array_values($list);
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             return [];
         }
     }
